@@ -15,6 +15,10 @@ BIN_BREW_EXPORTED_VARS=(
   HOMEBREW_USER_CONFIG_HOME
   HOMEBREW_ORIGINAL_BREW_FILE
 )
+BIN_BREW_EXPORTED_VARS_REGEX="^($(
+  IFS='|'
+  echo "${BIN_BREW_EXPORTED_VARS[*]}"
+))(=|$)"
 
 # Load Homebrew's variable configuration files from disk.
 export_homebrew_env_file() {
@@ -22,18 +26,20 @@ export_homebrew_env_file() {
 
   env_file="${1}"
   [[ -r "${env_file}" ]] || return 0
+
   while read -r line
   do
     # only load variables defined in env_config.rb
     [[ "${line}" =~ ^(HOMEBREW_|SUDO_ASKPASS=|(all|no|ftp|https?)_proxy=) ]] || continue
 
     # forbid overriding variables that are set in this file
-    local invalid_variable
-    for VAR in "${BIN_BREW_EXPORTED_VARS[@]}"
-    do
-      [[ "${line}" = "${VAR}"* ]] && invalid_variable="${VAR}"
-    done
-    [[ -n "${invalid_variable:-}" ]] && continue
+    [[ "${line}" =~ ${BIN_BREW_EXPORTED_VARS_REGEX} ]] && continue
+
+    if [[ "${line}" == HOMEBREW_EXPERIMENTAL_RUST_FRONTEND=* ]]
+    then
+      echo "Warning: Ignoring HOMEBREW_EXPERIMENTAL_RUST_FRONTEND. This cannot be set in an env file." >&2
+      continue
+    fi
 
     export "${line?}"
   done <"${env_file}"
@@ -58,6 +64,9 @@ export_homebrew_env_file "${HOMEBREW_PREFIX}/etc/homebrew/brew.env"
 if [[ -n "${XDG_CONFIG_HOME-}" ]]
 then
   HOMEBREW_USER_CONFIG_HOME="${XDG_CONFIG_HOME}/homebrew"
+elif [[ -n "${HOMEBREW_XDG_CONFIG_HOME-}" ]]
+then
+  HOMEBREW_USER_CONFIG_HOME="${HOMEBREW_XDG_CONFIG_HOME}/homebrew"
 else
   HOMEBREW_USER_CONFIG_HOME="${HOME}/.homebrew"
 fi
@@ -119,6 +128,7 @@ USED_BY_HOMEBREW_VARS=(
   VSCODE_IPC_HOOK_CLI
   WSL_DISTRO_NAME
   XDG_CACHE_HOME
+  XDG_CONFIG_HOME
   XDG_DATA_DIRS
   XDG_RUNTIME_DIR
   ZDOTDIR
