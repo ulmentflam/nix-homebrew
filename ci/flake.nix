@@ -38,8 +38,8 @@
       };
 
       githubPlatforms = {
-        "aarch64-darwin" = "macos-15";
-        "x86_64-darwin" = "macos-15";
+        "aarch64-darwin" = "macos-26";
+        "x86_64-darwin" = "macos-26";
       };
 
       matrix =
