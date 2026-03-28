@@ -35,7 +35,7 @@ let
   tools = pkgs.callPackage ../pkgs { };
 
   brew = if cfg.patchBrew then patchBrew cfg.package else cfg.package;
-  ruby = pkgs.ruby_3_4;
+  ruby = pkgs.ruby_4_0;
 
   # Sadly, we cannot replace coreutils since the GNU implementations
   # behave differently.
@@ -305,10 +305,17 @@ let
       --replace-fail 'for DIR in "''${HOMEBREW_REPOSITORY}"' "for DIR in "
 
     # Disable vendored Ruby
+    #
+    # Homebrew passes --disable=gems,rubyopt ($HOMEBREW_RUBY_DISABLE_OPTIONS)
+    # and inserts vendored libraries into LOAD_PATH (vendor/bundle/bundler/setup.rb, standalone/init.rb).
+    # Instead of re-enabling gems, we add in additional required gems into LOAD_PATH.
     ruby_sh="$out/Library/Homebrew/utils/ruby.sh"
-    if [[ -e "$ruby_sh" ]] && grep "setup-ruby-path" "$ruby_sh"; then
-      chmod u+w "$ruby_sh"
+    bundler_setup_rb="$out/Library/Homebrew/vendor/bundle/bundler/setup.rb"
+    if [[ -e "$ruby_sh" ]] && grep "setup-ruby-path" "$ruby_sh" >/dev/null; then
+      >&2 echo "Patching vendored Ruby..."
+      chmod u+w "$ruby_sh" "$bundler_setup_rb"
       echo -e "setup-ruby-path() { export HOMEBREW_RUBY_PATH=\"${ruby}/bin/ruby\"; }" >>"$ruby_sh"
+      echo -e "$:.unshift \"${ruby.gems.fiddle}/${ruby.gemPath}/gems/fiddle-${ruby.gems.fiddle.version}/lib\"" >>"$bundler_setup_rb"
     fi
   '' + lib.optionalString (brew ? version) ''
     # Embed version number instead of checking with git
