@@ -304,6 +304,22 @@ let
     substituteInPlace "$out/Library/Homebrew/cmd/update.sh" \
       --replace-fail 'for DIR in "''${HOMEBREW_REPOSITORY}"' "for DIR in "
 
+    # Allow loading formulae/casks from nix-store-backed taps.
+    # Homebrew 5.1.8+ added a check (utils/path.rb) that rejects any
+    # formula or cask whose realpath doesn't sit under the resolved tap
+    # root. nix-homebrew uses a two-layer symlink (Library/Taps ->
+    # taps-env -> per-tap nix store path), so every tapped formula
+    # realpath lands at a different /nix/store prefix and gets rejected.
+    # The check is intended to prevent `brew install ./malicious.rb`,
+    # not to second-guess a tap that's loaded entirely from /nix/store
+    # by design, so disable it.
+    chmod u+w "$out/Library/Homebrew"
+    chmod u+w "$out/Library/Homebrew/env_config.rb"
+    substituteInPlace "$out/Library/Homebrew/env_config.rb" \
+      --replace-fail \
+        'return false if ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"].present?' \
+        'return false # nix-homebrew: taps always load from /nix/store'
+
     # Disable vendored Ruby
     #
     # Homebrew passes --disable=gems,rubyopt ($HOMEBREW_RUBY_DISABLE_OPTIONS)
