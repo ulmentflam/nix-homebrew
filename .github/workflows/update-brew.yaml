@@ -11,8 +11,19 @@ permissions:
   pull-requests: write
 
 jobs:
-  update:
+  # 1. Resolve the latest release, bump the pin, and open a DRAFT PR.
+  #    Older still-open bump PRs are closed as superseded. The PR is
+  #    left as a draft until the validate job promotes it (see below),
+  #    so a bump that breaks the build stays visible as a draft instead
+  #    of silently never opening.
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      needs_update: ${{ steps.check.outputs.needs_update }}
+      old: ${{ steps.current.outputs.version }}
+      new: ${{ steps.latest.outputs.version }}
+      pr_number: ${{ steps.cpr.outputs.pull-request-number }}
+      branch: brew-src-update-${{ steps.latest.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,13 +83,15 @@ jobs:
           export BREW_SRC
           bash scripts/update-brew-tail.sh
 
-      - name: Open pull request
+      - name: Open draft pull request
+        id: cpr
         if: steps.check.outputs.needs_update == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.BREW_UPDATE_TOKEN }}
           branch: brew-src-update-${{ steps.latest.outputs.version }}
           delete-branch: true
+          draft: true
           commit-message: "chore(deps): upgrade brew-src to ${{ steps.latest.outputs.version }}"
           title: "chore(deps): upgrade brew-src to ${{ steps.latest.outputs.version }}"
           body: |
@@ -87,6 +100,70 @@ jobs:
             Bumps `brew-src` from `${{ steps.current.outputs.version }}` to `${{ steps.latest.outputs.version }}`.
 
             Upstream release: https://github.com/Homebrew/brew/releases/tag/${{ steps.latest.outputs.version }}
+
+            ---
+
+            Opened as a **draft**. The `validate` job builds the nuke + migrate
+            derivations against the new release; if they succeed the PR is marked
+            ready for review and auto-merge (merge on green) is enabled. If the
+            build breaks (e.g. a new release needs a `patchBrew` or nuke tweak),
+            this PR stays a draft for a human to fix.
           labels: |
             dependencies
             automated
+
+      - name: Supersede older bump PRs
+        if: steps.check.outputs.needs_update == 'true' && steps.cpr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ secrets.BREW_UPDATE_TOKEN }}
+          NEW_PR: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          set -Eeuo pipefail
+          for n in $(gh pr list --state open --json number,headRefName \
+              --jq '.[] | select(.headRefName | startswith("brew-src-update-")) | .number'); do
+            if [[ "$n" != "$NEW_PR" ]]; then
+              gh pr close "$n" --delete-branch \
+                --comment "Superseded by #${NEW_PR} (brew-src ${{ steps.latest.outputs.version }})." || true
+            fi
+          done
+
+  # 2. Build the nuke + migrate derivations against the bumped pin on a
+  #    real macOS runner. This catches the breakage classes that bumps
+  #    historically introduce: the nuke README check, patchBrew
+  #    `--replace-fail` mismatches, and brew.tail.sh slicing. Build-only
+  #    (no activation) — the PR's own CI still runs the full activation
+  #    matrix before auto-merge.
+  validate:
+    needs: prepare
+    if: needs.prepare.outputs.needs_update == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.branch }}
+
+      - uses: samueldr/lix-gha-installer-action@v2025-10-27
+
+      - name: Build nuke + migrate (validation)
+        run: |
+          set -Eeuo pipefail
+          nix build -L \
+            '.#packages.aarch64-darwin.nuke-homebrew-repository.passthru.tests.test-nuke' \
+            '.#ciTests.aarch64-darwin.migrate-unstable.config.system.build.toplevel'
+
+  # 3. Validation passed: take the draft out of draft and enable
+  #    auto-merge so the PR lands once its full CI is green. If validate
+  #    failed, this job is skipped and the PR remains a draft.
+  promote:
+    needs: [prepare, validate]
+    if: needs.prepare.outputs.needs_update == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark ready for review and enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.BREW_UPDATE_TOKEN }}
+          PR: ${{ needs.prepare.outputs.pr_number }}
+        run: |
+          set -Eeuo pipefail
+          gh pr ready "$PR" --repo "${{ github.repository }}" || true
+          gh pr merge "$PR" --repo "${{ github.repository }}" --auto --merge
