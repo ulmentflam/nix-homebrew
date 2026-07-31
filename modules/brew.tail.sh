@@ -15,10 +15,8 @@ BIN_BREW_EXPORTED_VARS=(
   HOMEBREW_USER_CONFIG_HOME
   HOMEBREW_ORIGINAL_BREW_FILE
 )
-BIN_BREW_EXPORTED_VARS_REGEX="^($(
-  IFS='|'
-  echo "${BIN_BREW_EXPORTED_VARS[*]}"
-))(=|$)"
+printf -v BIN_BREW_EXPORTED_VARS_REGEX '%s|' "${BIN_BREW_EXPORTED_VARS[@]}"
+BIN_BREW_EXPORTED_VARS_REGEX="^(${BIN_BREW_EXPORTED_VARS_REGEX%|})(=|$)"
 
 # Load Homebrew's variable configuration files from disk.
 export_homebrew_env_file() {
@@ -136,6 +134,8 @@ USED_BY_HOMEBREW_VARS=(
   GOBIN
   GOPATH
   LANG
+  LC_ALL
+  LC_CTYPE
   NODENV_ROOT
   PATH
   PYENV_ROOT
