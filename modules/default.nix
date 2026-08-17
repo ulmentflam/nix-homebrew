@@ -22,7 +22,13 @@
 # that automatically selects the correct prefix based on the architecture.
 # Use `arch -x86_64 brew` to install X86-64 packages.
 
-{ pkgs, lib, config, options, ... }:
+{
+  pkgs,
+  lib,
+  config,
+  options,
+  ...
+}:
 let
   inherit (lib) types;
 
@@ -41,155 +47,176 @@ let
   # behave differently.
   runtimePath = lib.makeBinPath [ pkgs.gitMinimal ];
 
-  prefixType = types.submodule ({ name, ... }: {
-    options = {
-      enable = lib.mkOption {
-        description = ''
-          Whether to set up this Homebrew prefix.
-        '';
-      };
-      prefix = lib.mkOption {
-        description = ''
-          The Homebrew prefix.
+  prefixType = types.submodule (
+    { name, ... }:
+    {
+      options = {
+        enable = lib.mkOption {
+          description = ''
+            Whether to set up this Homebrew prefix.
+          '';
+        };
+        prefix = lib.mkOption {
+          description = ''
+            The Homebrew prefix.
 
-          By default, it's `/opt/homebrew` for Apple Silicon Macs and
-          `/usr/local` for Intel Macs.
-        '';
-        type = types.str;
-        default = name;
-      };
-      library = lib.mkOption {
-        description = ''
-          The Homebrew library.
+            By default, it's `/opt/homebrew` for Apple Silicon Macs and
+            `/usr/local` for Intel Macs.
+          '';
+          type = types.str;
+          default = name;
+        };
+        library = lib.mkOption {
+          description = ''
+            The Homebrew library.
 
-          By default, it's `/opt/homebrew/Library` for Apple Silicon Macs and
-          `/usr/local/Homebrew/Library` for Intel Macs.
-        '';
-        type = types.str;
+            By default, it's `/opt/homebrew/Library` for Apple Silicon Macs and
+            `/usr/local/Homebrew/Library` for Intel Macs.
+          '';
+          type = types.str;
+        };
+        taps = lib.mkOption {
+          description = ''
+            A set of Nix-managed taps.
+          '';
+          type = types.attrsOf types.package;
+          default = { };
+          example = lib.literalExpression ''
+            {
+              "homebrew/homebrew-core" = pkgs.fetchFromGitHub {
+                owner = "homebrew";
+                repo = "homebrew-core";
+                rev = "...";
+                hash = "...";
+              };
+            }
+          '';
+        };
       };
-      taps = lib.mkOption {
-        description = ''
-          A set of Nix-managed taps.
-        '';
-        type = types.attrsOf types.package;
-        default = {};
-        example = lib.literalExpression ''
-          {
-            "homebrew/homebrew-core" = pkgs.fetchFromGitHub {
-              owner = "homebrew";
-              repo = "homebrew-core";
-              rev = "...";
-              hash = "...";
-            };
-          }
-        '';
-      };
-    };
-  });
+    }
+  );
 
   # Our unified brew launcher script.
   #
   # We use `/bin/bash` (Bash 3.2 :/) instead of `${runtimeShell}`
   # for compatibility with `arch -x86_64`.
-  brewLauncher = pkgs.writeScriptBin "brew" (''
-    #!/bin/bash
-    set -euo pipefail
-    cur_arch=$(/usr/bin/uname -m)
-  '' + lib.optionalString (cfg.prefixes.${cfg.defaultArm64Prefix}.enable) ''
-    if [[ "$cur_arch" == "arm64" ]]; then
-      exec "${cfg.prefixes.${cfg.defaultArm64Prefix}.prefix}/bin/brew" "$@"
-    fi
-  '' + lib.optionalString (cfg.prefixes.${cfg.defaultIntelPrefix}.enable) ''
-    if [[ "$cur_arch" == "x86_64" ]]; then
-      exec "${cfg.prefixes.${cfg.defaultIntelPrefix}.prefix}/bin/brew" "$@"
-    fi
-  '' + ''
-    >&2 echo "nix-homebrew: No Homebrew installation available for $cur_arch"
-    exit 1
-  '');
+  brewLauncher = pkgs.writeScriptBin "brew" (
+    ''
+      #!/bin/bash
+      set -euo pipefail
+      cur_arch=$(/usr/bin/uname -m)
+    ''
+    + lib.optionalString (cfg.prefixes.${cfg.defaultArm64Prefix}.enable) ''
+      if [[ "$cur_arch" == "arm64" ]]; then
+        exec "${cfg.prefixes.${cfg.defaultArm64Prefix}.prefix}/bin/brew" "$@"
+      fi
+    ''
+    + lib.optionalString (cfg.prefixes.${cfg.defaultIntelPrefix}.enable) ''
+      if [[ "$cur_arch" == "x86_64" ]]; then
+        exec "${cfg.prefixes.${cfg.defaultIntelPrefix}.prefix}/bin/brew" "$@"
+      fi
+    ''
+    + ''
+      >&2 echo "nix-homebrew: No Homebrew installation available for $cur_arch"
+      exit 1
+    ''
+  );
 
   # Prefix-specific bin/brew
   #
   # No prefix/library/repo auto-detection, everything is configured by Nix.
-  makeBinBrew = prefix: let
-    template = pkgs.writeText "brew.in" (''
-      #!/bin/bash
-      export HOMEBREW_PREFIX="@prefix@"
-      export HOMEBREW_LIBRARY="@library@"
-      export HOMEBREW_REPOSITORY="$HOMEBREW_LIBRARY/.homebrew-is-managed-by-nix"
-      export HOMEBREW_BREW_FILE="@out@"
+  makeBinBrew =
+    prefix:
+    let
+      template = pkgs.writeText "brew.in" (
+        ''
+          #!/bin/bash
+          export HOMEBREW_PREFIX="@prefix@"
+          export HOMEBREW_LIBRARY="@library@"
+          export HOMEBREW_REPOSITORY="$HOMEBREW_LIBRARY/.homebrew-is-managed-by-nix"
+          export HOMEBREW_BREW_FILE="@out@"
 
-      # Homebrew itself cannot self-update, so we set
-      # fake before/after versions to make `update-report.rb` happy
-      export HOMEBREW_UPDATE_BEFORE="nix"
-      export HOMEBREW_UPDATE_AFTER="nix"
-    '' + lib.optionalString (!cfg.mutableTaps) ''
-      # Disable auto-update since everything is pinned
-      export HOMEBREW_NO_AUTO_UPDATE=1
-    '' + lib.optionalString (prefix.taps ? "homebrew/homebrew-core") ''
-      # Disable API to use pinned homebrew-core
-      export HOMEBREW_NO_INSTALL_FROM_API=1
-    '' + (lib.optionalString (cfg.extraEnv != {})
-            (lib.concatLines (lib.mapAttrsToList (name: value: "export ${name}=${lib.escapeShellArg value}") cfg.extraEnv)))
-       + (builtins.readFile ./brew.tail.sh));
-  in pkgs.replaceVarsWith {
-    name = "brew";
-    src = template;
-    isExecutable = true;
+          # Homebrew itself cannot self-update, so we set
+          # fake before/after versions to make `update-report.rb` happy
+          export HOMEBREW_UPDATE_BEFORE="nix"
+          export HOMEBREW_UPDATE_AFTER="nix"
+        ''
+        + lib.optionalString (!cfg.mutableTaps) ''
+          # Disable auto-update since everything is pinned
+          export HOMEBREW_NO_AUTO_UPDATE=1
+        ''
+        + lib.optionalString (prefix.taps ? "homebrew/homebrew-core") ''
+          # Disable API to use pinned homebrew-core
+          export HOMEBREW_NO_INSTALL_FROM_API=1
+        ''
+        + (lib.optionalString (cfg.extraEnv != { }) (
+          lib.concatLines (
+            lib.mapAttrsToList (name: value: "export ${name}=${lib.escapeShellArg value}") cfg.extraEnv
+          )
+        ))
+        + (builtins.readFile ./brew.tail.sh)
+      );
+    in
+    pkgs.replaceVarsWith {
+      name = "brew";
+      src = template;
+      isExecutable = true;
 
-    # Must retain #!/bin/bash, otherwise `arch -x86_64 /usr/local/bin/brew`
-    # on Apple Silicon will not work.
-    dontPatchShebangs = true;
+      # Must retain #!/bin/bash, otherwise `arch -x86_64 /usr/local/bin/brew`
+      # on Apple Silicon will not work.
+      dontPatchShebangs = true;
 
-    replacements = {
-      out = placeholder "out";
-      inherit runtimePath;
-      inherit (prefix) prefix library;
+      replacements = {
+        out = placeholder "out";
+        inherit runtimePath;
+        inherit (prefix) prefix library;
+      };
     };
-  };
 
-  setupHomebrew = let
-    enabledPrefixes = lib.filter (prefix: prefix.enable) (builtins.attrValues cfg.prefixes);
-  in pkgs.writeShellScript "setup-homebrew" ''
-    set -euo pipefail
-    source ${./utils.sh}
+  setupHomebrew =
+    let
+      enabledPrefixes = lib.filter (prefix: prefix.enable) (builtins.attrValues cfg.prefixes);
+    in
+    pkgs.writeShellScript "setup-homebrew" ''
+      set -euo pipefail
+      source ${./utils.sh}
 
-    NIX_HOMEBREW_UID=$(id -u "${cfg.user}" || (error "Failed to get UID of ${cfg.user}"; exit 1))
-    NIX_HOMEBREW_GID=$(dscl . -read "/Groups/${cfg.group}" | awk '($1 == "PrimaryGroupID:") { print $2 }' || (error "Failed to get GID of ${cfg.group}"; exit 1))
+      NIX_HOMEBREW_UID=$(id -u "${cfg.user}" || (error "Failed to get UID of ${cfg.user}"; exit 1))
+      NIX_HOMEBREW_GID=$(dscl . -read "/Groups/${cfg.group}" | awk '($1 == "PrimaryGroupID:") { print $2 }' || (error "Failed to get GID of ${cfg.group}"; exit 1))
 
-    is_in_nix_store() {
-      # /nix/store/anything -> inside
-      # /nix/store/.../link-to-outside-store -> inside
-      # ./result-link-into-store -> inside
+      is_in_nix_store() {
+        # /nix/store/anything -> inside
+        # /nix/store/.../link-to-outside-store -> inside
+        # ./result-link-into-store -> inside
 
-      [[ "$1" != "${builtins.storeDir}"* ]] || return 0
+        [[ "$1" != "${builtins.storeDir}"* ]] || return 0
 
-      if [[ -e "$1" ]]
-      then
-        path="$(readlink -f $1)"
-      else
-        path="$1"
+        if [[ -e "$1" ]]
+        then
+          path="$(readlink -f $1)"
+        else
+          path="$1"
+        fi
+
+        if [[ "$path" == "${builtins.storeDir}"* ]]
+        then
+          return 0
+        else
+          return 1
+        fi
+      }
+
+      is_occupied() {
+        [[ -e "$1" ]] && ([[ ! -L "$1" ]] || ! is_in_nix_store "$1")
+      }
+
+      ${lib.concatMapStrings setupPrefix enabledPrefixes}
+
+      if test -n "${toString cfg.enableRosetta}" && ! pgrep -q oahd; then
+        warn "The Intel Homebrew prefix has been set up, but Rosetta isn't installed yet."
+        ohai "Run ''${tty_bold}softwareupdate --install-rosetta''${tty_reset} to install it."
       fi
-
-      if [[ "$path" == "${builtins.storeDir}"* ]]
-      then
-        return 0
-      else
-        return 1
-      fi
-    }
-
-    is_occupied() {
-      [[ -e "$1" ]] && ([[ ! -L "$1" ]] || ! is_in_nix_store "$1")
-    }
-
-    ${lib.concatMapStrings setupPrefix enabledPrefixes}
-
-    if test -n "${toString cfg.enableRosetta}" && ! pgrep -q oahd; then
-      warn "The Intel Homebrew prefix has been set up, but Rosetta isn't installed yet."
-      ohai "Run ''${tty_bold}softwareupdate --install-rosetta''${tty_reset} to install it."
-    fi
-  '';
+    '';
 
   setupPrefix = prefix: ''
     HOMEBREW_PREFIX="${prefix.prefix}"
@@ -254,95 +281,115 @@ let
     /bin/ln -shf "${makeBinBrew prefix}" "$BIN_BREW"
   '';
 
-  setupTaps = taps:
+  setupTaps =
+    taps:
     # Mixed taps
-    if cfg.mutableTaps then lib.concatMapStrings (path: let
-      # Each path must be in the form of `user/repo`
-      namespace = builtins.head (lib.splitString "/" path);
-      target = taps.${path};
+    if cfg.mutableTaps then
+      lib.concatMapStrings (
+        path:
+        let
+          # Each path must be in the form of `user/repo`
+          namespace = builtins.head (lib.splitString "/" path);
+          target = taps.${path};
 
-      namespaceDir = "$HOMEBREW_LIBRARY/Taps/${namespace}";
-      tapDir = "$HOMEBREW_LIBRARY/Taps/${path}";
-    in ''
-      if [[ -e "${namespaceDir}" ]] && [[ ! -d "${namespaceDir}" ]]; then
-        error "$tty_underline${namespaceDir}$tty_reset is in the way and needs to be moved out for $tty_underline${path}$tty_reset"
-        exit 1
-      fi
-      if is_occupied "${tapDir}"; then
-        error "An existing $tty_underline${tapDir}$tty_reset is in the way"
-        exit 1
-      fi
-      "''${MKDIR[@]}" "${namespaceDir}"
-      "''${CHOWN[@]}" "$NIX_HOMEBREW_UID:$NIX_HOMEBREW_GID" "${namespaceDir}"
-      "''${CHMOD[@]}" "ug=rwx" "${namespaceDir}"
-      /bin/ln -shf "${target}" "${tapDir}"
-    '') (builtins.attrNames taps)
+          namespaceDir = "$HOMEBREW_LIBRARY/Taps/${namespace}";
+          tapDir = "$HOMEBREW_LIBRARY/Taps/${path}";
+        in
+        ''
+          if [[ -e "${namespaceDir}" ]] && [[ ! -d "${namespaceDir}" ]]; then
+            error "$tty_underline${namespaceDir}$tty_reset is in the way and needs to be moved out for $tty_underline${path}$tty_reset"
+            exit 1
+          fi
+          if is_occupied "${tapDir}"; then
+            error "An existing $tty_underline${tapDir}$tty_reset is in the way"
+            exit 1
+          fi
+          "''${MKDIR[@]}" "${namespaceDir}"
+          "''${CHOWN[@]}" "$NIX_HOMEBREW_UID:$NIX_HOMEBREW_GID" "${namespaceDir}"
+          "''${CHMOD[@]}" "ug=rwx" "${namespaceDir}"
+          /bin/ln -shf "${target}" "${tapDir}"
+        ''
+      ) (builtins.attrNames taps)
 
     # Fully declarative taps
-    else let
-      env = pkgs.runCommandLocal "taps-env" {} (lib.concatMapStrings (path: let
-        namespace = builtins.head (lib.splitString "/" path);
-        target = taps.${path};
-      in ''
-        mkdir -p "$out/${namespace}"
-        ln -s "${target}" "$out/${path}"
-      '') (builtins.attrNames taps));
-    in ''
-      if is_occupied "$HOMEBREW_LIBRARY/Taps"; then
-        error "An existing $tty_underline$HOMEBREW_LIBRARY/Taps$tty_reset is in the way"
-        exit 1
-      fi
+    else
+      let
+        env = pkgs.runCommandLocal "taps-env" { } (
+          lib.concatMapStrings (
+            path:
+            let
+              namespace = builtins.head (lib.splitString "/" path);
+              target = taps.${path};
+            in
+            ''
+              mkdir -p "$out/${namespace}"
+              ln -s "${target}" "$out/${path}"
+            ''
+          ) (builtins.attrNames taps)
+        );
+      in
+      ''
+        if is_occupied "$HOMEBREW_LIBRARY/Taps"; then
+          error "An existing $tty_underline$HOMEBREW_LIBRARY/Taps$tty_reset is in the way"
+          exit 1
+        fi
 
-      /bin/ln -shf "${env}" "$HOMEBREW_LIBRARY/Taps"
-    '';
+        /bin/ln -shf "${env}" "$HOMEBREW_LIBRARY/Taps"
+      '';
 
-  patchBrew = brew: pkgs.runCommandLocal "${brew.name or "brew"}-patched" {} (''
-    cp -r "${brew}" "$out"
-    chmod u+w "$out" "$out/Library/Homebrew/cmd"
+  patchBrew =
+    brew:
+    pkgs.runCommandLocal "${brew.name or "brew"}-patched" { } (
+      ''
+        cp -r "${brew}" "$out"
+        chmod u+w "$out" "$out/Library/Homebrew/cmd"
 
-    # Disable self-update behavior
-    substituteInPlace "$out/Library/Homebrew/cmd/update.sh" \
-      --replace-fail 'for DIR in "''${HOMEBREW_REPOSITORY}"' "for DIR in "
+        # Disable self-update behavior
+        substituteInPlace "$out/Library/Homebrew/cmd/update.sh" \
+          --replace-fail 'for DIR in "''${HOMEBREW_REPOSITORY}"' "for DIR in "
 
-    # Allow loading formulae/casks from nix-store-backed taps.
-    # Homebrew 5.1.8+ added a check (utils/path.rb) that rejects any
-    # formula or cask whose realpath doesn't sit under the resolved tap
-    # root. nix-homebrew uses a two-layer symlink (Library/Taps ->
-    # taps-env -> per-tap nix store path), so every tapped formula
-    # realpath lands at a different /nix/store prefix and gets rejected.
-    # The check is intended to prevent `brew install ./malicious.rb`,
-    # not to second-guess a tap that's loaded entirely from /nix/store
-    # by design, so disable it.
-    chmod u+w "$out/Library/Homebrew"
-    chmod u+w "$out/Library/Homebrew/env_config.rb"
-    substituteInPlace "$out/Library/Homebrew/env_config.rb" \
-      --replace-fail \
-        'return false if ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"].present?' \
-        'return false # nix-homebrew: taps always load from /nix/store'
+        # Allow loading formulae/casks from nix-store-backed taps.
+        # Homebrew 5.1.8+ added a check (utils/path.rb) that rejects any
+        # formula or cask whose realpath doesn't sit under the resolved tap
+        # root. nix-homebrew uses a two-layer symlink (Library/Taps ->
+        # taps-env -> per-tap nix store path), so every tapped formula
+        # realpath lands at a different /nix/store prefix and gets rejected.
+        # The check is intended to prevent `brew install ./malicious.rb`,
+        # not to second-guess a tap that's loaded entirely from /nix/store
+        # by design, so disable it.
+        chmod u+w "$out/Library/Homebrew"
+        chmod u+w "$out/Library/Homebrew/env_config.rb"
+        substituteInPlace "$out/Library/Homebrew/env_config.rb" \
+          --replace-fail \
+            'return false if ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"].present?' \
+            'return false # nix-homebrew: taps always load from /nix/store'
 
-    # Disable vendored Ruby
-    #
-    # Homebrew passes --disable=gems,rubyopt ($HOMEBREW_RUBY_DISABLE_OPTIONS)
-    # and inserts vendored libraries into LOAD_PATH (vendor/bundle/bundler/setup.rb, standalone/init.rb).
-    # Instead of re-enabling gems, we add in additional required gems into LOAD_PATH.
-    ruby_sh="$out/Library/Homebrew/utils/ruby.sh"
-    bundler_setup_rb="$out/Library/Homebrew/vendor/bundle/bundler/setup.rb"
-    if [[ -e "$ruby_sh" ]] && grep "setup-ruby-path" "$ruby_sh" >/dev/null; then
-      >&2 echo "Patching vendored Ruby..."
-      chmod u+w "$ruby_sh" "$bundler_setup_rb"
-      echo -e "setup-ruby-path() { export HOMEBREW_RUBY_PATH=\"${ruby}/bin/ruby\"; }" >>"$ruby_sh"
-      echo -e "$:.unshift \"${ruby.gems.fiddle}/${ruby.gemPath}/gems/fiddle-${ruby.gems.fiddle.version}/lib\"" >>"$bundler_setup_rb"
-    fi
-  '' + lib.optionalString (brew ? version) ''
-    # Embed version number instead of checking with git
-    brew_sh="$out/Library/Homebrew/brew.sh"
-    chmod u+w "$out/Library/Homebrew" "$brew_sh"
-    sed -i -e 's/^HOMEBREW_VERSION=.*/HOMEBREW_VERSION="${brew.version}"/g' "$brew_sh"
+        # Disable vendored Ruby
+        #
+        # Homebrew passes --disable=gems,rubyopt ($HOMEBREW_RUBY_DISABLE_OPTIONS)
+        # and inserts vendored libraries into LOAD_PATH (vendor/bundle/bundler/setup.rb, standalone/init.rb).
+        # Instead of re-enabling gems, we add in additional required gems into LOAD_PATH.
+        ruby_sh="$out/Library/Homebrew/utils/ruby.sh"
+        bundler_setup_rb="$out/Library/Homebrew/vendor/bundle/bundler/setup.rb"
+        if [[ -e "$ruby_sh" ]] && grep "setup-ruby-path" "$ruby_sh" >/dev/null; then
+          >&2 echo "Patching vendored Ruby..."
+          chmod u+w "$ruby_sh" "$bundler_setup_rb"
+          echo -e "setup-ruby-path() { export HOMEBREW_RUBY_PATH=\"${ruby}/bin/ruby\"; }" >>"$ruby_sh"
+          echo -e "$:.unshift \"${ruby.gems.fiddle}/${ruby.gemPath}/gems/fiddle-${ruby.gems.fiddle.version}/lib\"" >>"$bundler_setup_rb"
+        fi
+      ''
+      + lib.optionalString (brew ? version) ''
+        # Embed version number instead of checking with git
+        brew_sh="$out/Library/Homebrew/brew.sh"
+        chmod u+w "$out/Library/Homebrew" "$brew_sh"
+        sed -i -e 's/^HOMEBREW_VERSION=.*/HOMEBREW_VERSION="${brew.version}"/g' "$brew_sh"
 
-    # 4.3.5: Clear GIT_REVISION to bypass caching mechanism
-    sed -i -e 's/^GIT_REVISION=.*/GIT_REVISION=""; HOMEBREW_VERSION="${brew.version}"/g' "$brew_sh"
-  '');
-in {
+        # 4.3.5: Clear GIT_REVISION to bypass caching mechanism
+        sed -i -e 's/^GIT_REVISION=.*/GIT_REVISION=""; HOMEBREW_VERSION="${brew.version}"/g' "$brew_sh"
+      ''
+    );
+in
+{
   options = {
     nix-homebrew = {
       enable = lib.mkOption {
@@ -374,7 +421,7 @@ in {
           These are applied to the default prefixes.
         '';
         type = types.attrsOf types.package;
-        default = {};
+        default = { };
         example = lib.literalExpression ''
           {
             "homebrew/homebrew-core" = pkgs.fetchFromGitHub {
@@ -455,7 +502,7 @@ in {
           Extra environment variables to set for Homebrew.
         '';
         type = types.attrsOf types.str;
-        default = {};
+        default = { };
         example = lib.literalExpression ''
           {
             HOMEBREW_NO_ANALYTICS = "1";
@@ -542,10 +589,12 @@ in {
 
     # disable the install homebrew check
     # see https://github.com/LnL7/nix-darwin/pull/1178 and https://github.com/zhaofengli/nix-homebrew/issues/45
-    system.checks.text = lib.mkIf config.homebrew.enable (lib.mkBefore ''
-      # Ignore unused variable in nix-darwin versions without it
-      # shellcheck disable=SC2034
-      INSTALLING_HOMEBREW=1
-    '');
+    system.checks.text = lib.mkIf config.homebrew.enable (
+      lib.mkBefore ''
+        # Ignore unused variable in nix-darwin versions without it
+        # shellcheck disable=SC2034
+        INSTALLING_HOMEBREW=1
+      ''
+    );
   };
 }

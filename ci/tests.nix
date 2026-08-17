@@ -89,13 +89,15 @@ in
       ci.postScript = ''
         >&2 echo "Checking brew"
         which brew
-      '' + lib.optionalString pkgs.stdenv.hostPlatform.isAarch64 ''
+      ''
+      + lib.optionalString pkgs.stdenv.hostPlatform.isAarch64 ''
         >&2 echo "Checking that we can still use the unbound package"
         $(brew --prefix)/sbin/unbound -V
 
         >&2 echo "Checking that we can still use the tap we added imperatively"
         brew install koekeishiya/formulae/yabai
-      '' + lib.optionalString config.nix-homebrew.enableRosetta ''
+      ''
+      + lib.optionalString config.nix-homebrew.enableRosetta ''
         >&2 echo "Checking we can execute the Intel brew with arch -x86_64"
         arch -x86_64 /usr/local/bin/brew config | grep "HOMEBREW_PREFIX: /usr/local"
 
