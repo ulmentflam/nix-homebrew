@@ -67,6 +67,18 @@
       forAllSystems =
         f: lib.genAttrs supportedSystems (system: f inputs.nixpkgs_unstable.legacyPackages.${system});
 
+      # The module itself is Darwin-only, but formatting is platform
+      # independent and CI's cheap matrix-generation runner is Linux. Exposing
+      # the formatter on Linux too lets the format check run there instead of
+      # burning a macOS runner, and lets Linux contributors run `nix fmt`.
+      formatterSystems = supportedSystems ++ [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+
+      forAllFormatterSystems =
+        f: lib.genAttrs formatterSystems (system: f inputs.nixpkgs_unstable.legacyPackages.${system});
+
       makeCi =
         { self, brew-src }:
         let
@@ -108,14 +120,34 @@
               inherit brew-src;
             }
           );
+          # pkgs.nixfmt IS the RFC 166 formatter now; the old
+          # `nixfmt-rfc-style` alias emits a deprecation warning on every eval.
+          formatter = forAllFormatterSystems (pkgs: pkgs.nixfmt);
+
           devShell = forAllSystems (
             pkgs:
             pkgs.mkShell {
+              # Same derivation `nix fmt` and CI use, so a commit formatted in
+              # the dev shell is exactly what the format check expects.
               nativeBuildInputs = with pkgs; [
-                nixfmt-rfc-style
+                nixfmt
               ];
 
               BREW_SRC = brew-src;
+
+              # Opt the checkout into .githooks/, which carries the pre-commit
+              # nixfmt check. .envrc runs `use_flake`, so for anyone using
+              # direnv this happens just by entering the directory. Scoped with
+              # --local so it only ever affects this clone.
+              shellHook = ''
+                if command -v git >/dev/null 2>&1 \
+                  && git rev-parse --git-dir >/dev/null 2>&1 \
+                  && [ -d .githooks ] \
+                  && [ "$(git config --local --get core.hooksPath || true)" != ".githooks" ]; then
+                  git config --local core.hooksPath .githooks
+                  echo "nix-homebrew: enabled .githooks (pre-commit nixfmt check)"
+                fi
+              '';
             }
           );
           githubActions = inputs.nix-github-actions.lib.mkGithubMatrix {

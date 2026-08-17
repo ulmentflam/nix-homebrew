@@ -38,9 +38,13 @@
         default = nix-homebrew;
       };
 
+      # `formatter` comes from the CI flake so the consumer-facing flake keeps
+      # its single `brew-src` input — adding nixpkgs here would push that
+      # dependency onto everyone importing this module.
       inherit (ci)
         packages
         devShell
+        formatter
         ciTests
         githubActions
         ;

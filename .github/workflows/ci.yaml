@@ -5,6 +5,28 @@ on:
   pull_request:
 
 jobs:
+  format:
+    name: nixfmt
+    # Formatting is platform independent, so this runs on the cheap Linux
+    # runner rather than consuming a macOS one. It uses the flake's own
+    # formatter output so CI checks with the same pinned nixfmt contributors
+    # get from `nix develop`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: samueldr/lix-gha-installer-action@v2025-10-27
+      - name: Check formatting
+        run: |
+          set -Eeuo pipefail
+          nixfmt="$(nix build --no-link --print-out-paths '.#formatter.x86_64-linux')/bin/nixfmt"
+          # -z / xargs -0 rather than mapfile: no bash 4 dependency and safe
+          # for paths with spaces.
+          if ! git ls-files -z '*.nix' | xargs -0 "$nixfmt" --check; then
+            echo
+            echo "::error::Nix files are not nixfmt-clean. Run 'nix fmt' and commit the result."
+            exit 1
+          fi
+
   nix-matrix:
     runs-on: ubuntu-latest
     outputs:

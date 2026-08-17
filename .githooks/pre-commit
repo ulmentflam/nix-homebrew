@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Rejects a commit when a staged .nix file is not nixfmt-clean (RFC 166).
+#
+# Enable it with either:
+#   nix develop          # the devShell's shellHook sets core.hooksPath
+#   direnv allow         # .envrc runs `use_flake`, so this happens on cd
+# or by hand:
+#   git config --local core.hooksPath .githooks
+#
+# Checks the *staged* content rather than the worktree, since that is what
+# actually gets committed — a file fixed on disk but not re-added still fails.
+#
+# Bypass with `git commit --no-verify`.
+
+set -uo pipefail
+
+# Resolve the flake's OWN pinned formatter rather than trusting whatever
+# `nixfmt` happens to be on PATH. nixfmt's layout rules change between
+# releases (1.2 and 1.4 disagree about splitting function arguments), so a
+# newer nixfmt installed system-wide would happily "fix" files into a state
+# that CI — which uses the pinned one — then rejects. Resolving through the
+# flake keeps the hook and CI byte-identical. The store path is cached, so
+# this is only slow the very first time.
+NIXFMT=""
+if command -v nix >/dev/null 2>&1; then
+  system=$(nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null || true)
+  if [ -n "$system" ]; then
+    out=$(nix build --no-link --print-out-paths ".#formatter.$system" 2>/dev/null || true)
+    [ -n "$out" ] && [ -x "$out/bin/nixfmt" ] && NIXFMT="$out/bin/nixfmt"
+  fi
+fi
+
+# Fall back to PATH (i.e. the devShell's nixfmt) if the flake can't be built —
+# offline, say. Warn and allow if there's nothing at all; the CI format check
+# is the real gate, and a hook should not wedge an offline commit.
+if [ -z "$NIXFMT" ]; then
+  if command -v nixfmt >/dev/null 2>&1; then
+    NIXFMT=$(command -v nixfmt)
+    echo "pre-commit: using nixfmt from PATH ($NIXFMT); may differ from CI's pinned version." >&2
+  else
+    echo "pre-commit: no nixfmt available — skipping the Nix format check." >&2
+    echo "            Run inside \`nix develop\` to enable it locally." >&2
+    exit 0
+  fi
+fi
+
+# --diff-filter=ACM: added/copied/modified only, so a staged deletion isn't
+# looked up in the index and treated as a failure.
+staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.nix')
+
+[ -z "$staged" ] && exit 0
+
+unformatted=()
+while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  if ! git show ":$file" | "$NIXFMT" --check - >/dev/null 2>&1; then
+    unformatted+=("$file")
+  fi
+done <<<"$staged"
+
+if [ ${#unformatted[@]} -gt 0 ]; then
+  echo "pre-commit: these staged Nix files are not nixfmt-clean:" >&2
+  printf '  %s\n' "${unformatted[@]}" >&2
+  echo >&2
+  echo "Fix and re-stage:" >&2
+  printf '  nix fmt %s && git add %s\n' "${unformatted[*]}" "${unformatted[*]}" >&2
+  echo >&2
+  echo "Or bypass: git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0
