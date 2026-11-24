@@ -357,12 +357,21 @@ let
         # The check is intended to prevent `brew install ./malicious.rb`,
         # not to second-guess a tap that's loaded entirely from /nix/store
         # by design, so disable it.
-        chmod u+w "$out/Library/Homebrew"
-        chmod u+w "$out/Library/Homebrew/env_config.rb"
-        substituteInPlace "$out/Library/Homebrew/env_config.rb" \
-          --replace-fail \
-            'return false if ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"].present?' \
-            'return false # nix-homebrew: taps always load from /nix/store'
+        #
+        # Homebrew 7.0.14 removed that opt-out: forbid_packages_from_paths?
+        # is hard-coded to true and has no callers, and the tap check moved
+        # to Utils::Path.tap_package_path, which compares realpaths against
+        # tap.path.realpath. Each taps-env entry is a direct symlink to its
+        # store path, so tapped formulae resolve without a patch. Apply it
+        # only to releases that still carry the opt-out line.
+        env_config="$out/Library/Homebrew/env_config.rb"
+        if grep -qF 'HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS' "$env_config"; then
+          chmod u+w "$out/Library/Homebrew" "$env_config"
+          substituteInPlace "$env_config" \
+            --replace-fail \
+              'return false if ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"].present?' \
+              'return false # nix-homebrew: taps always load from /nix/store'
+        fi
 
         # Disable vendored Ruby
         #
